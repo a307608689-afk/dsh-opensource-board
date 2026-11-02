@@ -1,0 +1,9 @@
+{
+  "meta": {
+    "title": "开源项目",
+    "description": "本机开源项目看板：版本、分支、未提交改动、最近提交、远程地址，全部本地读取"
+  },
+  "settings.section": {
+    "opensource-board": "开源项目"
+  }
+}

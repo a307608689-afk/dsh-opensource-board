@@ -1,0 +1,9 @@
+{
+  "meta": {
+    "title": "Open-source projects",
+    "description": "Local open-source project board: version, branch, uncommitted changes, last commit, remote URL — read entirely from local git"
+  },
+  "settings.section": {
+    "opensource-board": "Open-source projects"
+  }
+}
