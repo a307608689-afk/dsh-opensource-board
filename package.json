@@ -1,8 +1,8 @@
 {
   "name": "dsh-opensource-board",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
-  "description": "DSH 开源项目看板：在设置页只读展示本机 git 仓库（版本、分支、未提交改动、最近提交、远程地址）",
+  "description": "DSH 开源项目看板：在设置页只读展示本机 git 仓库（版本、分支、未提交改动、最近提交、远程地址、同步状态）",
   "license": "MIT",
   "author": "a307608689-afk",
   "keywords": [
@@ -20,6 +20,7 @@
     "selftest": "node selftest.mjs",
     "smoke": "node tools/smoke.mjs",
     "smoke:client": "node tools/client-smoke.mjs",
+    "check:oss": "node tools/check.mjs",
     "test": "node selftest.mjs && node tools/smoke.mjs && node tools/client-smoke.mjs",
     "check": "node --check index.js && node --check client.js && node --check selftest.mjs && node tools/embed-css.mjs --check",
     "embed-css": "node tools/embed-css.mjs"
@@ -35,6 +36,7 @@
     "client.js",
     "ui.css",
     "locale",
+    "tools",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"

@@ -31,15 +31,24 @@ import { renderProjectsHtml, sanitizeText } from './lib/project-info.mjs'
 const execFileAsync = promisify(execFile)
 
 export const name = 'dsh-opensource-board'
-export const version = '0.1.0'
+export const version = '0.1.1'
 export const inject = ['webServer']
 
 /** 需求指定的主路由；alias 是为了兜底宿主对 `/api` 命名空间的所有权（见 README）。 */
 const ROUTE = '/api/dsh-opensource-board'
 const ALIAS_ROUTE = '/dsh-opensource-board'
 
-/** 需求指定的默认扫描根目录。 */
-export const DEFAULT_ROOT = 'D:\\Documents\\deepseek-harness\\default-workspace'
+/** 默认扫描根目录：可用 DSH_BOARD_ROOT 覆盖，否则按当前用户主目录推导，不硬编码任何机器路径。 */
+export const DEFAULT_ROOT = process.env.DSH_BOARD_ROOT || join(homedir(), 'Documents', 'deepseek-harness', 'default-workspace')
+
+/**
+ * 「我的 GitHub 账号」默认值。只用于本地字符串比对（判断项目是不是自己传的），
+ * 不联网、不校验这个账号真实存在 —— 配置里写了 githubUser 就以配置为准。
+ */
+export const DEFAULT_GITHUB_USER = 'a307608689-afk'
+
+/** 自检报告目录：$DSH_HOME/opensource-board/reports/latest.json（由外部脚本生成）。 */
+const REPORTS_FILE_LIMIT = 1024 * 1024
 
 const GIT_TIMEOUT_MS = 8000
 const GIT_MAX_BUFFER = 8 * 1024 * 1024
@@ -116,15 +125,22 @@ function envRootsOverride() {
 }
 
 function defaultConfig() {
-  return { roots: [DEFAULT_ROOT], maxProjects: DEFAULT_MAX_PROJECTS }
+  return { roots: [DEFAULT_ROOT], maxProjects: DEFAULT_MAX_PROJECTS, githubUser: DEFAULT_GITHUB_USER }
+}
+
+/** 账号名归一：去掉 @ 前缀与空白，空值回退默认账号。 */
+export function normalizeGithubUser(raw) {
+  const s = sanitizeText(raw, 80).replace(/^@+/, '').trim()
+  return s || DEFAULT_GITHUB_USER
 }
 
 export function normalizeConfigShape(input) {
-  const out = { roots: [], maxProjects: DEFAULT_MAX_PROJECTS, warnings: [] }
+  const out = { roots: [], maxProjects: DEFAULT_MAX_PROJECTS, githubUser: DEFAULT_GITHUB_USER, warnings: [] }
   if (!input || typeof input !== 'object') {
     out.warnings.push('配置不是对象，已使用默认值')
     return { ...out, ...defaultConfig() }
   }
+  out.githubUser = normalizeGithubUser(input.githubUser)
   const roots = Array.isArray(input.roots) ? input.roots : []
   for (const raw of roots) {
     const norm = normalizeRoot(raw)
@@ -144,9 +160,17 @@ async function loadConfig() {
   const override = envRootsOverride()
   const file = configPath()
   if (override) {
-    // 环境变量模式：完全以环境变量为准，配置文件不参与
+    // 环境变量模式：根目录完全以环境变量为准，但「我的账号」仍从配置文件读（不联网）
+    let ghUser = DEFAULT_GITHUB_USER
+    try {
+      const text = await fsp.readFile(file, 'utf8')
+      const parsed = JSON.parse(text)
+      ghUser = normalizeGithubUser(parsed && parsed.githubUser)
+    } catch {
+      // 读不到 / 坏 JSON：用默认账号，不影响扫描
+    }
     return {
-      config: { roots: override, maxProjects: DEFAULT_MAX_PROJECTS },
+      config: { roots: override, maxProjects: DEFAULT_MAX_PROJECTS, githubUser: ghUser },
       warnings: [],
       file,
       envOverride: true,
@@ -179,7 +203,11 @@ async function loadConfig() {
   }
   const norm = normalizeConfigShape(parsed)
   return {
-    config: { roots: norm.roots.length ? norm.roots : defaultConfig().roots, maxProjects: norm.maxProjects },
+    config: {
+      roots: norm.roots.length ? norm.roots : defaultConfig().roots,
+      maxProjects: norm.maxProjects,
+      githubUser: norm.githubUser,
+    },
     warnings: norm.warnings,
     file,
     envOverride: false,
@@ -224,6 +252,7 @@ async function scan({ force = false } = {}) {
     scannedRoots: result.scannedRoots,
     truncated: result.truncated,
     roots: loaded.config.roots,
+    githubUser: loaded.config.githubUser,
     envOverride: loaded.envOverride,
   }
   cache = { at: Date.now(), payload }
@@ -235,7 +264,11 @@ function invalidateCache() {
 }
 
 /** 对外输出的项目记录：显式列字段，避免把内部字段漏出去。 */
-export function publicProject(p) {
+export function publicProject(p, opts = {}) {
+  const gh = String(opts.githubUser || '').trim().toLowerCase()
+  const owner = p.owner || null
+  // mine 纯本地字符串比对：不联网、不调 API、不缓存 token
+  const mine = !!(owner && gh && owner.toLowerCase() === gh)
   return {
     dir: p.dir,
     root: p.root,
@@ -247,6 +280,15 @@ export function publicProject(p) {
     dirtyCount: typeof p.dirtyCount === 'number' ? p.dirtyCount : null,
     lastCommit: p.lastCommit ? { at: p.lastCommit.at, subject: p.lastCommit.subject } : null,
     remoteUrl: p.remoteUrl || null,
+    owner,
+    mine,
+    ahead: typeof p.ahead === 'number' ? p.ahead : null,
+    behind: typeof p.behind === 'number' ? p.behind : null,
+    syncState: p.syncState || 'unknown',
+    recentCommits: Array.isArray(p.recentCommits)
+      ? p.recentCommits.slice(0, 3).map((c) => ({ at: c.at, hash: c.hash, subject: c.subject }))
+      : [],
+    latestTag: p.latestTag || null,
     hasPackageJson: !!p.hasPackageJson,
     errors: Array.isArray(p.errors) ? p.errors : [],
   }
@@ -311,9 +353,12 @@ async function handleProjects(req, res) {
   }
   const url = parseUrl(req)
   const force = !!(url && (url.searchParams.get('refresh') === '1' || url.searchParams.get('refresh') === 'true'))
+  const onlyMine = !!(url && (url.searchParams.get('onlyMine') === '1' || url.searchParams.get('onlyMine') === 'true'))
   const data = await scan({ force })
   // 需求：这个接口直接返回 JSON 数组
-  sendJson(res, 200, data.projects.map(publicProject))
+  let list = data.projects.map((p) => publicProject(p, { githubUser: data.githubUser }))
+  if (onlyMine) list = list.filter((p) => p.mine)
+  sendJson(res, 200, list)
 }
 
 async function handleStatus(req, res) {
@@ -332,6 +377,7 @@ async function handleStatus(req, res) {
     generatedAt: new Date().toISOString(),
     count: data.projects.length,
     roots: data.roots,
+    githubUser: data.githubUser,
     envOverride: data.envOverride,
     configFile: loaded.file,
     truncated: data.truncated,
@@ -405,8 +451,11 @@ async function handleConfig(req, res) {
     return
   }
 
-  const next = normalizeConfigShape({ roots: accepted, maxProjects: input.maxProjects })
-  const saved = { roots: next.roots, maxProjects: next.maxProjects }
+  // 请求体没带 githubUser 就沿用当前配置里的账号，避免保存根目录时把账号冲掉
+  const current = await loadConfig()
+  const ghUser = input.githubUser === undefined ? current.config.githubUser : normalizeGithubUser(input.githubUser)
+  const next = normalizeConfigShape({ roots: accepted, maxProjects: input.maxProjects, githubUser: ghUser })
+  const saved = { roots: next.roots, maxProjects: next.maxProjects, githubUser: next.githubUser }
   let file
   try {
     file = await saveConfig(saved)
@@ -416,6 +465,56 @@ async function handleConfig(req, res) {
   }
   invalidateCache()
   sendJson(res, 200, { ok: true, config: saved, configFile: file, rejected })
+}
+
+/** 自检报告文件路径（由外部脚本写入，本插件只读）。 */
+export function reportPath() {
+  return join(dshHome(), 'opensource-board', 'reports', 'latest.json')
+}
+
+/**
+ * GET /reports/latest —— 读取「上次自检结果」。
+ * 文件不存在是正常状态（还没跑过自检），返回 { ok:true, data:null } 而不是 404，
+ * 前端据此显示「还没有自检记录」。
+ */
+async function handleReportsLatest(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendJson(res, 405, { ok: false, error: '只支持 GET', code: 'METHOD_NOT_ALLOWED' })
+    return
+  }
+  const file = reportPath()
+  let raw
+  try {
+    const st = await fsp.stat(file)
+    if (!st.isFile()) {
+      sendJson(res, 200, { ok: true, data: null })
+      return
+    }
+    if (st.size > REPORTS_FILE_LIMIT) {
+      sendJson(res, 200, { ok: true, data: null, warning: '报告文件过大（' + st.size + ' 字节），已忽略' })
+      return
+    }
+    raw = await fsp.readFile(file, 'utf8')
+  } catch (e) {
+    if (e && e.code === 'ENOENT') {
+      sendJson(res, 200, { ok: true, data: null })
+      return
+    }
+    sendJson(res, 200, {
+      ok: true,
+      data: null,
+      warning: '读取报告失败：' + sanitizeText((e && e.code) || (e && e.message), 80),
+    })
+    return
+  }
+  let data
+  try {
+    data = JSON.parse(raw)
+  } catch {
+    sendJson(res, 200, { ok: true, data: null, warning: 'latest.json 不是合法 JSON' })
+    return
+  }
+  sendJson(res, 200, { ok: true, data, reportFile: file })
 }
 
 async function handleExport(req, res) {
@@ -460,6 +559,7 @@ const ROUTES = {
   '/projects': handleProjects,
   '/status': handleStatus,
   '/config': handleConfig,
+  '/reports/latest': handleReportsLatest,
   '/export.html': handleExport,
 }
 
@@ -515,4 +615,23 @@ export function apply(ctx) {
 }
 
 /** 供 selftest / smoke 使用（非 DSH 入口协议的一部分）。 */
-export const __internal = { ROUTES, ROUTE, ALIAS_ROUTE, DEFAULT_ROOT, configPath, loadConfig, saveConfig, normalizeConfigShape, publicProject, scan, invalidateCache, runGit }
+export const __internal = {
+  ROUTES,
+  ROUTE,
+  ALIAS_ROUTE,
+  DEFAULT_ROOT,
+  DEFAULT_GITHUB_USER,
+  dshHome,
+  configPath,
+  reportPath,
+  loadConfig,
+  saveConfig,
+  normalizeConfigShape,
+  normalizeGithubUser,
+  publicProject,
+  scan,
+  invalidateCache,
+  runGit,
+  handleProjects,
+  handleReportsLatest,
+}

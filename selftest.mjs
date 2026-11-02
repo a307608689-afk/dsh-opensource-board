@@ -13,7 +13,8 @@
  */
 
 import assert from 'node:assert/strict'
-import { resolve, join, sep } from 'node:path'
+import { promises as fsp } from 'node:fs'
+import { resolve, join, sep, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { normalizeRoot, pathInside, safeJoinInside, samePath } from './lib/path-safety.mjs'
@@ -25,12 +26,24 @@ import {
   parseLastCommit,
   parseBranch,
   parseRemoteUrl,
+  parseRemoteOwner,
+  parseRecentCommits,
+  parseAheadBehind,
+  parseLatestTag,
+  computeSyncState,
   redactUrlCredentials,
   formatLocalIso,
   renderProjectsHtml,
 } from './lib/project-info.mjs'
 import { discoverProjects, inspectRepo, mapLimit } from './lib/discover.mjs'
-import { normalizeConfigShape, publicProject, DEFAULT_ROOT } from './index.js'
+import {
+  normalizeConfigShape,
+  normalizeGithubUser,
+  publicProject,
+  DEFAULT_ROOT,
+  DEFAULT_GITHUB_USER,
+  __internal,
+} from './index.js'
 
 let passed = 0
 const failures = []
@@ -329,10 +342,13 @@ function makeDeps(opts) {
         throw e
       }
       const key = args[0] === 'rev-parse' && args[1] === '--abbrev-ref' ? 'branch'
-        : args[0] === 'status' ? 'status'
-          : args[0] === 'log' ? 'log'
-            : args[0] === 'remote' ? 'remote'
-              : 'other'
+        : args[0] === 'rev-parse' && args[1] === '--short' ? 'shortSha'
+          : args[0] === 'status' ? 'status'
+            : args[0] === 'log' ? (args.includes('-3') ? 'recent' : 'log')
+              : args[0] === 'remote' ? 'remote'
+                : args[0] === 'describe' ? 'tag'
+                  : args[0] === 'rev-list' ? 'aheadBehind'
+                    : 'other'
       if (spec[key] == null) {
         const e = new Error('git failed: ' + args.join(' '))
         throw e
@@ -362,6 +378,9 @@ await testAsync('discoverProjects 解析出完整项目记录', async () => {
         status: ' M a.js\n?? b/\n',
         log: '2026-11-01T12:00:00+08:00\nfeat: alpha 首提交\n',
         remote: 'https://github.com/acme/alpha.git\n',
+        recent: '2026-11-01T12:00:00+08:00\u001ff1a2b3c\u001ffeat: alpha 首提交\n2026-10-30T08:00:00+08:00\u001fe9d8c7b\u001ffix: 修个 bug\n',
+        tag: 'v1.0.0\n',
+        aheadBehind: '1\t2\n',
       },
       beta: {
         branch: 'HEAD\n',
@@ -387,11 +406,22 @@ await testAsync('discoverProjects 解析出完整项目记录', async () => {
   assert.equal(alpha.lastCommit.subject, 'feat: alpha 首提交')
   assert.equal(alpha.remoteUrl, 'https://github.com/acme/alpha.git')
   assert.equal(alpha.hasPackageJson, true)
+  assert.equal(alpha.owner, 'acme')
+  assert.equal(alpha.ahead, 2)
+  assert.equal(alpha.behind, 1)
+  assert.equal(alpha.syncState, 'diverged')
+  assert.equal(alpha.latestTag, 'v1.0.0')
+  assert.equal(alpha.recentCommits.length, 2)
+  assert.equal(alpha.recentCommits[0].hash, 'f1a2b3c')
+  assert.equal(alpha.recentCommits[1].subject, 'fix: 修个 bug')
 
   const beta = result.projects.find((p) => p.name === 'beta')
   assert.ok(beta)
   assert.equal(beta.dirtyCount, 0)
   assert.equal(beta.remoteUrl, 'git@github.com:acme/beta.git')
+  assert.equal(beta.owner, 'acme')
+  assert.equal(beta.syncState, 'unknown')
+  assert.equal(beta.latestTag, null)
 
   // 排序：@acme/alpha 的排序键 "@acme/alpha" < "beta"
   assert.equal(result.projects[0].name, '@acme/alpha')
@@ -500,8 +530,13 @@ test('normalizeConfigShape 非对象输入回退默认值', () => {
   assert.ok(norm.warnings.length >= 1)
 })
 
-test('DEFAULT_ROOT 是需求指定的目录', () => {
-  assert.equal(DEFAULT_ROOT, 'D:\\Documents\\deepseek-harness\\default-workspace')
+test('DEFAULT_ROOT 不硬编码机器路径（可由 DSH_BOARD_ROOT 覆盖）', () => {
+  if (process.env.DSH_BOARD_ROOT) {
+    assert.equal(DEFAULT_ROOT, process.env.DSH_BOARD_ROOT)
+  } else {
+    assert.ok(DEFAULT_ROOT.endsWith('default-workspace'), 'DEFAULT_ROOT 应推导到工作区目录')
+    assert.ok(!/^[D-Z]:\\/i.test(DEFAULT_ROOT), '不应硬编码非系统盘路径')
+  }
 })
 
 test('publicProject 只暴露白名单字段并保留中文/原始路径', () => {
@@ -523,8 +558,9 @@ test('publicProject 只暴露白名单字段并保留中文/原始路径', () =>
     git: { ok: true },
   })
   assert.deepEqual(Object.keys(out).sort(), [
-    'branch', 'description', 'detached', 'dir', 'dirtyCount', 'errors',
-    'hasPackageJson', 'lastCommit', 'name', 'remoteUrl', 'root', 'version',
+    'ahead', 'behind', 'branch', 'description', 'detached', 'dir', 'dirtyCount', 'errors',
+    'hasPackageJson', 'lastCommit', 'latestTag', 'mine', 'name', 'owner', 'recentCommits',
+    'remoteUrl', 'root', 'syncState', 'version',
   ])
   assert.equal(out.warnings, undefined)
   assert.equal(out.git, undefined)
@@ -532,6 +568,159 @@ test('publicProject 只暴露白名单字段并保留中文/原始路径', () =>
 })
 
 // ── 汇总 ───────────────────────────────────────────────────────────────────
+// ── 5. 同步状态 / 最近提交 / 自检报告 ──────────────────────────────────────
+section('同步状态与最近提交')
+
+test('parseRemoteOwner 兼容 https / ssh / ssh://', () => {
+  assert.equal(parseRemoteOwner('https://github.com/a307608689-afk/dsh-session-trash.git'), 'a307608689-afk')
+  assert.equal(parseRemoteOwner('https://github.com/a307608689-afk/dsh-session-trash'), 'a307608689-afk')
+  assert.equal(parseRemoteOwner('git@github.com:a307608689-afk/dsh-session-trash.git'), 'a307608689-afk')
+  assert.equal(parseRemoteOwner('ssh://git@github.com/a307608689-afk/dsh-session-trash.git'), 'a307608689-afk')
+  assert.equal(parseRemoteOwner(''), null)
+  assert.equal(parseRemoteOwner('not a url'), null)
+})
+
+test('parseRemoteOwner 对带凭据的 https 也能取 owner', () => {
+  assert.equal(parseRemoteOwner('https://user:ghp_xxx@github.com/acme/repo.git'), 'acme')
+})
+
+test('parseRecentCommits 按 US 分隔解析、坏行跳过', () => {
+  const text = [
+    '2026-11-02T10:00:00+08:00\u001fab12cd3\u001ffeat: 加看板',
+    'bad-date\u001fdead\u001f跳过我',
+    '2026-11-01T09:00:00+08:00\u001f12ab34c\u001ffix: 修 bug',
+    '',
+  ].join('\n')
+  const commits = parseRecentCommits(text, 3)
+  assert.equal(commits.length, 2)
+  assert.equal(commits[0].hash, 'ab12cd3')
+  assert.equal(commits[0].subject, 'feat: 加看板')
+  assert.equal(commits[1].subject, 'fix: 修 bug')
+})
+
+test('parseRecentCommits 空输入返回空数组', () => {
+  assert.deepEqual(parseRecentCommits(''), [])
+  assert.deepEqual(parseRecentCommits(null), [])
+})
+
+test('parseAheadBehind 左=behind 右=ahead', () => {
+  assert.deepEqual(parseAheadBehind('0\t0\n'), { ahead: 0, behind: 0 })
+  assert.deepEqual(parseAheadBehind('3\t5\n'), { ahead: 5, behind: 3 })
+  assert.deepEqual(parseAheadBehind('garbage'), { ahead: null, behind: null })
+})
+
+test('parseLatestTag 空输出返回 null', () => {
+  assert.equal(parseLatestTag('v0.1.0\n'), 'v0.1.0')
+  assert.equal(parseLatestTag('   '), null)
+  assert.equal(parseLatestTag(undefined), null)
+})
+
+test('computeSyncState 六种状态', () => {
+  assert.equal(computeSyncState({ hasRemote: false, ahead: null, behind: null }), 'no-remote')
+  assert.equal(computeSyncState({ hasRemote: true, ahead: null, behind: null }), 'unknown')
+  assert.equal(computeSyncState({ hasRemote: true, ahead: 0, behind: 0 }), 'synced')
+  assert.equal(computeSyncState({ hasRemote: true, ahead: 2, behind: 0 }), 'ahead')
+  assert.equal(computeSyncState({ hasRemote: true, ahead: 0, behind: 3 }), 'behind')
+  assert.equal(computeSyncState({ hasRemote: true, ahead: 2, behind: 3 }), 'diverged')
+})
+
+test('normalizeGithubUser 去 @ 前缀、空值回退默认账号', () => {
+  assert.equal(normalizeGithubUser('@a307608689-afk'), 'a307608689-afk')
+  assert.equal(normalizeGithubUser('  '), DEFAULT_GITHUB_USER)
+  assert.equal(normalizeGithubUser(undefined), DEFAULT_GITHUB_USER)
+})
+
+test('publicProject 的 mine 是纯本地比对', () => {
+  const base = {
+    dir: 'D:\\ws\\a', root: 'D:\\ws', name: 'a', owner: 'a307608689-afk',
+    remoteUrl: 'https://github.com/a307608689-afk/a.git', syncState: 'synced', ahead: 0, behind: 0,
+  }
+  assert.equal(publicProject(base, { githubUser: 'a307608689-afk' }).mine, true)
+  assert.equal(publicProject(base, { githubUser: 'A307608689-AFK' }).mine, true)
+  assert.equal(publicProject(base, { githubUser: 'someone-else' }).mine, false)
+  assert.equal(publicProject({ ...base, owner: null }, { githubUser: 'a307608689-afk' }).mine, false)
+  assert.equal(publicProject({ ...base, owner: null }, {}).mine, false)
+})
+
+test('publicProject 里 ahead/behind 非数字归一成 null', () => {
+  const out = publicProject({ dir: 'd', root: 'r', name: 'n', ahead: 'x', behind: undefined })
+  assert.equal(out.ahead, null)
+  assert.equal(out.behind, null)
+  assert.equal(out.syncState, 'unknown')
+  assert.deepEqual(out.recentCommits, [])
+  assert.equal(out.latestTag, null)
+})
+
+section('自检报告接口')
+
+function fakeRes() {
+  return {
+    statusCode: 0,
+    headers: {},
+    body: '',
+    headersSent: false,
+    writeHead(code, headers) {
+      this.statusCode = code
+      this.headers = headers || {}
+      this.headersSent = true
+      return this
+    },
+    end(text) {
+      this.body = text == null ? '' : String(text)
+      return this
+    },
+  }
+}
+
+async function withDshHome(home, fn) {
+  const prev = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  try {
+    return await fn()
+  } finally {
+    if (prev === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = prev
+  }
+}
+
+await testAsync('handleReportsLatest 报告不存在时返回 200 + data:null', async () => {
+  const home = fakeRoot('no-such-dsh-home')
+  await withDshHome(home, async () => {
+    const res = fakeRes()
+    await __internal.handleReportsLatest({ method: 'GET', url: '/' }, res)
+    assert.equal(res.statusCode, 200)
+    const body = JSON.parse(res.body)
+    assert.equal(body.ok, true)
+    assert.equal(body.data, null)
+  })
+})
+
+await testAsync('handleReportsLatest 拒绝 POST', async () => {
+  const res = fakeRes()
+  await __internal.handleReportsLatest({ method: 'POST', url: '/' }, res)
+  assert.equal(res.statusCode, 405)
+})
+
+await testAsync('handleReportsLatest 原样读回报告文件', async () => {
+  const home = join(tmpdir(), 'dsh-ob-selftest-' + Date.now())
+  const file = join(home, 'opensource-board', 'reports', 'latest.json')
+  await fsp.mkdir(dirname(file), { recursive: true })
+  const payload = { generatedAt: '2026-11-02T15:30:00+08:00', totals: { block: 0, warn: 3 }, projects: [] }
+  await fsp.writeFile(file, JSON.stringify(payload), 'utf8')
+  try {
+    await withDshHome(home, async () => {
+      const res = fakeRes()
+      await __internal.handleReportsLatest({ method: 'GET', url: '/' }, res)
+      assert.equal(res.statusCode, 200)
+      const body = JSON.parse(res.body)
+      assert.equal(body.ok, true)
+      assert.deepEqual(body.data, payload)
+    })
+  } finally {
+    await fsp.rm(home, { recursive: true, force: true })
+  }
+})
+
 console.log('\n' + '─'.repeat(58))
 if (failures.length) {
   console.log('FAIL ' + passed + ' passed, ' + failures.length + ' failed')

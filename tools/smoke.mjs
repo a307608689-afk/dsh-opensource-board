@@ -34,6 +34,9 @@ await fsp.unlink(TMP_CONFIG).catch(() => {})
 process.env.DSH_OPENSOURCE_BOARD_CONFIG = TMP_CONFIG
 delete process.env.DSH_OPENSOURCE_BOARD_ROOTS
 
+// 默认扫描根指向本仓库所在的工作区（真实存在 git 仓库），不依赖任何机器特定路径
+if (!process.env.DSH_BOARD_ROOT) process.env.DSH_BOARD_ROOT = join(HERE, '..', '..')
+
 const { apply, DEFAULT_ROOT } = await import('../index.js')
 
 const routes = new Map()

@@ -309,3 +309,128 @@
 .dsh-ob__input:disabled {
   opacity: 0.6;
 }
+
+/* ── 只看我的 / 同步状态 / 最近提交 / 自检结果 ───────────────── */
+.dsh-ob__filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.dsh-ob__filter input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.dsh-ob__sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(127, 127, 127, 0.32);
+  white-space: nowrap;
+}
+
+.dsh-ob__sync--synced { border-color: rgba(52, 168, 83, 0.55); }
+.dsh-ob__sync--ahead { border-color: rgba(64, 132, 255, 0.55); }
+.dsh-ob__sync--behind { border-color: rgba(234, 134, 0, 0.55); }
+.dsh-ob__sync--diverged { border-color: rgba(217, 72, 72, 0.55); }
+.dsh-ob__sync--unknown,
+.dsh-ob__sync--no-remote { opacity: 0.65; }
+
+.dsh-ob__tag {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.dsh-ob__commits-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.dsh-ob__commits {
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.dsh-ob__commit {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11.5px;
+  opacity: 0.85;
+  min-width: 0;
+}
+
+.dsh-ob__commit-when,
+.dsh-ob__commit-hash {
+  flex: none;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  opacity: 0.7;
+}
+
+.dsh-ob__commit-subject {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-ob__report {
+  border: 1px solid rgba(127, 127, 127, 0.26);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dsh-ob__report-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.dsh-ob__report-head .dsh-ob__btn {
+  margin-left: auto;
+}
+
+.dsh-ob__report-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.dsh-ob__report-verdict--block { color: #d94848; font-weight: 600; }
+.dsh-ob__report-verdict--ok { color: #34a853; font-weight: 600; }
+
+.dsh-ob__finding {
+  font-size: 11.5px;
+  opacity: 0.88;
+  padding-left: 10px;
+  border-left: 2px solid rgba(127, 127, 127, 0.28);
+  margin-top: 3px;
+  word-break: break-word;
+}
+
+.dsh-ob__finding--block { border-left-color: rgba(217, 72, 72, 0.75); }
+.dsh-ob__finding--warn { border-left-color: rgba(234, 134, 0, 0.75); }
+

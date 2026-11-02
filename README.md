@@ -16,6 +16,10 @@
 | 未提交改动数 | `git status --porcelain` 的行数，0 显示「干净」 |
 | 最近一次提交 | `git log -1 --format=%cI%n%s` → 本地时间 + 标题 |
 | 远程仓库 URL | `git remote get-url origin`（没有 origin 显示 `—`） |
+| 是否本人仓库 | 从 remote URL 解析 owner，与配置里的 `githubUser` 做**纯本地字符串比对**（不联网） |
+| 同步状态 | `git rev-list --left-right --count origin/<分支>...HEAD` → 已同步 / 有 N 个未推送 / 落后 N 个提交 / 已分叉 / 无远程 / 未知 |
+| 最近提交 | `git log -3 --format=%cI%x1f%h%x1f%s`，展示最近 3 条（时间 + 短 hash + 标题） |
+| 最新 tag | `git describe --tags --abbrev=0`（没有 tag 显示 `—`） |
 
 界面还带：
 
@@ -24,6 +28,10 @@
 - **空状态提示**：没有发现项目时引导你去加扫描根目录
 - **加载失败提示**：接口挂了会显示具体错误 + 重试按钮，不会把设置页打白
 - **扫描根目录编辑器**：增删目录、保存后立即重扫
+- **只看我的**：顶部开关（默认开），只显示 remote owner 等于配置里 `githubUser` 的仓库；
+  关掉后显示全部，非本人仓库带「非本人仓库」标记
+- **上次自检面板**：读 `opensource-board/reports/latest.json`（由你本地的上传前自检脚本生成），
+  显示「上次自检：时间 · N 阻断 / M 警告」，可展开看每个项目的 findings；没有报告时提示去跑一次
 - 扫描告警：某个根目录不存在 / 越界 / 项目数超上限时，单独列出来，不影响其他项目显示
 
 ---
@@ -81,13 +89,16 @@
 
 ```json
 {
-  "roots": ["D:\\Documents\\deepseek-harness\\default-workspace"],
-  "maxProjects": 200
+  "roots": ["<你的项目目录绝对路径，如 D:/projects>"],
+  "maxProjects": 200,
+  "githubUser": "your-github-username"
 }
 ```
 
 - `roots`：扫描根目录数组，**只扫描这些目录下「直接子目录里含 `.git`」的一层**，不递归。
 - `maxProjects`：项目总数上限，1–1000，默认 200。
+- `githubUser`：你的 GitHub 用户名，用于判定「我上传的仓库」（默认 `a307608689-afk`；
+  写 `@` 前缀会被去掉，留空回退默认值）。**只做本地字符串比对，不访问 GitHub API。**
 
 可以直接改文件，也可以在界面上改（界面上改会原子写回这个文件）。
 
@@ -115,19 +126,20 @@ DSH 宿主是否把 `/api` 命名空间留给插件、我没有在宿主源码�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/dsh-opensource-board/projects` | **返回 JSON 数组**（需求指定形状）。支持 `?refresh=1` 跳过缓存 |
-| GET | `/api/dsh-opensource-board/status` | `{ ok, plugin, version, generatedAt, count, roots, envOverride, configFile, truncated, warnings }` |
+| GET | `/api/dsh-opensource-board/projects` | **返回 JSON 数组**（需求指定形状）。支持 `?refresh=1` 跳过缓存；`?onlyMine=1` 只返回本人仓库 |
+| GET | `/api/dsh-opensource-board/status` | `{ ok, plugin, version, githubUser, generatedAt, count, roots, envOverride, configFile, truncated, warnings }` |
 | GET | `/api/dsh-opensource-board/config` | 当前生效配置 + 默认值 |
 | POST | `/api/dsh-opensource-board/config` | `{ roots: [...], maxProjects? }`，非法路径进 `rejected`；被环境变量锁定时 409 |
 | GET | `/api/dsh-opensource-board/export.html` | 自包含 HTML 报表（带 CSP `default-src 'none'`） |
+| GET | `/api/dsh-opensource-board/reports/latest` | 读 `opensource-board/reports/latest.json`：`{ ok: true, data: <报告 JSON> }`；文件不存在 / 损坏 / 超过 1MB 时 `data: null`（**不报错**，看板照常显示） |
 
 `/projects` 真实输出样例（本机跑出来的，两条真实仓库）：
 
 ```json
 [
   {
-    "dir": "D:\\Documents\\deepseek-harness\\default-workspace\\dsh-cost-meter-src",
-    "root": "D:\\Documents\\deepseek-harness\\default-workspace",
+    "dir": "D:\\ws\\dsh-cost-meter-src",
+    "root": "D:\\ws",
     "name": "dsh-cost-meter",
     "version": "0.3.0",
     "description": "Per-step token cost ledger with peak/off-peak pricing ...",
@@ -139,6 +151,19 @@ DSH 宿主是否把 `/api` 命名空间留给插件、我没有在宿主源码�
       "subject": "fix: restore cost accounting and add weekday-selected peak windows"
     },
     "remoteUrl": "https://github.com/Creakono/dsh-cost-meter",
+    "owner": "Creakono",
+    "mine": false,
+    "ahead": 0,
+    "behind": 0,
+    "syncState": "synced",
+    "recentCommits": [
+      {
+        "at": "2026-09-22T22:01:27+08:00",
+        "hash": "26256e7",
+        "subject": "fix: restore cost accounting and add weekday-selected peak windows"
+      }
+    ],
+    "latestTag": null,
     "hasPackageJson": true,
     "errors": []
   }
@@ -151,7 +176,9 @@ DSH 宿主是否把 `/api` 命名空间留给插件、我没有在宿主源码�
 
 这是本插件的设计底线，也都有对应代码位置：
 
-1. **不联网、不存 token、不上传数据。** 服务端只做三件事：列目录、读 `package.json`、跑本地 git 读命令。
+1. **不联网、不存 token、不上传数据。** 服务端只做三件事：列目录、读 `package.json`、跑本地 git 读命令
+   （`rev-parse` / `status` / `log` / `remote get-url` / `describe` / `rev-list`，全部纯本地）。
+   「我的仓库」判定也只把 remote URL 里的 owner 字符串与配置值比对，**不访问 GitHub API**。
    没有 `fetch`、没有 HTTP 客户端、没有任何遥测。git 也不会联网：
    `git status/log/rev-parse/remote get-url` 都是纯本地命令，`credential.helper=` 与
    `GIT_TERMINAL_PROMPT=0` 进一步保证不会弹凭据、不会卡在输入密码。
@@ -171,6 +198,39 @@ DSH 宿主是否把 `/api` 命名空间留给插件、我没有在宿主源码�
 
 ---
 
+## 上传前自检（开源安全检查）
+
+在把仓库推成 public 之前先跑一遍：
+
+```bash
+node tools/check.mjs                  # 检查当前仓库
+node tools/check.mjs --root <目录>     # 扫描该目录下所有 git 仓库
+node tools/check.mjs --json           # 机器可读输出
+node tools/check.mjs --save           # 报告写入 <DSH_HOME>/opensource-board/reports/
+```
+
+退出码：`0` = 没有阻断项；`1` = 有阻断项（此时别上传）；`2` = 用法错误。
+
+**分三级：**
+
+| 级别 | 什么情况 | 处理 |
+|---|---|---|
+| 阻断 | 密钥 / token / 私钥、`.env`、含用户名的路径、本机用户目录、git 历史里的密钥、缺 LICENSE | 必须改掉 |
+| 警告 | 其他绝对路径、源码里的邮箱、手机号、提交用真实邮箱、版本号与 tag/CHANGELOG 不一致、大文件、二进制文件 | 建议处理 |
+| 提示 | 测试夹具里的假路径（`D:\ws`、`C:\a\bc` 这类）、README/LICENSE 里的联系邮箱 | 人工确认即可 |
+
+**检查项**：敏感文件（`.env` / `*.pem` / `id_rsa` / `.npmrc`）、token 与私钥模式（`ghp_` / `gho_` / `ghu_` / `github_pat_` / `sk-` / `AKIA`）、Windows 盘符路径与 `~/` 路径、本机用户名、邮箱、手机号、LICENSE 缺失与许可证不一致、版本号一致性（`package.json` vs 最新 tag vs CHANGELOG）、最近 50 条 commit 历史里的密钥、大于 50MB 的文件、二进制文件提醒、README 是否写了「非官方」与许可证链接。
+
+**放行**：人工确认没问题的项，可以记进 `<DSH_HOME>/opensource-board/accepted.json`，下次不再报：
+
+```json
+{ "items": [ { "id": "binary-file", "file": "docs/screenshots/01.png", "reason": "已人工确认无个人信息" } ] }
+```
+
+扫描通过 ≠ 可以公开：文件名、注释里的一句话、截图内容，这些扫描看不出来，最终判断还是在人。
+
+---
+
 ## 开发与自检
 
 零第三方依赖，Node 20+（本机 Node v24.21.0 上验证）。
@@ -178,20 +238,21 @@ DSH 宿主是否把 `/api` 命名空间留给插件、我没有在宿主源码�
 ```bash
 node --check index.js        # 服务端入口语法
 node --check client.js       # 浏览器入口语法
-node selftest.mjs            # 离线单元自检：37 项
+node selftest.mjs            # 离线单元自检：50 项
 node tools/smoke.mjs         # 真实 HTTP + 真实 git 的端到端冒烟（13 项）
-node tools/client-smoke.mjs  # 用假 React/假 fetch 真渲染组件（9 项）
+node tools/client-smoke.mjs  # 用假 React/假 fetch 真渲染组件（13 项）
 node tools/embed-css.mjs     # 改完 ui.css 后把样式内联进 client.js
 node tools/embed-css.mjs --check   # 校验 client.js 内联 CSS 与 ui.css 同步
 ```
 
 - `selftest.mjs`：不联网、不执行 git、不写仓库。假 deps 注入，覆盖路径校验（越界/相对路径/控制字符）、
-  git 输出解析（分支、porcelain 计数、`%cI%n%s`）、空目录、根目录不存在、junction 越界、HTML 转义。
+  git 输出解析（分支、porcelain 计数、`%cI%n%s`、`%cI%x1f%h%x1f%s`）、remote owner 解析、`ahead/behind`
+  与六种同步状态、空目录、根目录不存在、junction 越界、HTML 转义、`reports/latest` 的三种情况（不存在 / POST / 真文件读回）。
 - `tools/smoke.mjs`：伪造 `ctx`/`webServer`，把插件注册的 handler 挂到 `127.0.0.1` 临时端口，
   用 `fetch` 真请求 `/projects`、`/status`、`/config`（含非法输入 400/405）、`/export.html`、别名路由。
   配置指向 `.tmp/smoke-config.json`，不会改你的真实配置。
 - `tools/client-smoke.mjs`：不依赖浏览器与真实 React，验 `settings.section` 注册参数、卡片字段、
-  空状态、失败态、别名回退，以及「仓库内容按文本节点渲染」。
+  空状态、失败态、别名回退、「仓库内容按文本节点渲染」、同步状态徽标、只看我的过滤、自检面板。
 
 ### 目录结构
 
@@ -223,7 +284,10 @@ dsh-opensource-board/
 - **配置没有宿主级 schema**：已装插件都是自己管一个 JSON 文件，本插件沿用这一做法；
   如果 DSH 之后提供官方配置 API，这里可以换过去。
 - **git 命令 8 秒超时**：网络盘上的超大仓库可能读超时，此时该项目的 `errors` 字段会有说明，其他项目不受影响。
-- 未在 DSH GUI 里做人工截图验收（需要改本机 profile 并重启 DSH）；组件渲染是用
+- **同步状态可能显示「未知」**：浅克隆、没有 `origin` 对应分支、远端分支尚未 fetch 时，
+  `git rev-list --left-right --count origin/<分支>...HEAD` 会失败，此时 `ahead`/`behind` 为 `null`、
+  显示「未知」而不是猜一个数。`git describe --tags --abbrev=0` 在没有 tag 时返回 `null`。
+- **未在 DSH GUI 里做人工截图验收**（需要改本机 profile 并重启 DSH）；组件渲染是用
   `tools/client-smoke.mjs` 的无头冒烟验证的。
 
 ---

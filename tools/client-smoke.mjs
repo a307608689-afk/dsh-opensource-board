@@ -104,6 +104,13 @@ const SAMPLE_PROJECTS = [
     dirtyCount: 3,
     lastCommit: { at: '2026-11-01T12:00:00+08:00', subject: 'feat: 首提交' },
     remoteUrl: 'https://github.com/acme/alpha.git',
+    owner: 'acme',
+    mine: false,
+    ahead: 2,
+    behind: 0,
+    syncState: 'ahead',
+    recentCommits: [{ at: '2026-11-01T12:00:00+08:00', hash: 'abc1234', subject: 'feat: 首提交' }],
+    latestTag: 'v1.2.3',
     hasPackageJson: true,
     errors: [],
   },
@@ -118,12 +125,20 @@ const SAMPLE_PROJECTS = [
     dirtyCount: 0,
     lastCommit: null,
     remoteUrl: null,
+    owner: null,
+    mine: false,
+    ahead: null,
+    behind: null,
+    syncState: 'no-remote',
+    recentCommits: [],
+    latestTag: null,
     hasPackageJson: false,
     errors: ['分支读取失败：demo'],
   },
 ]
 
 let mode = 'ok' // ok | empty | fail
+let reportsAvailable = false
 const fetchCalls = []
 
 globalThis.fetch = async (url, init) => {
@@ -146,7 +161,30 @@ globalThis.fetch = async (url, init) => {
       warnings: mode === 'empty' ? [] : [{ code: 'ROOT_MISSING', error: '演示告警：目录不存在' }],
     }
   } else if (u.includes('/config')) {
-    body = { ok: true, config: { roots: ['D:\\ws'], maxProjects: 200 }, envOverride: false, defaults: {} }
+    body = { ok: true, config: { roots: ['D:\\ws'], maxProjects: 200, githubUser: 'a307608689-afk' }, envOverride: false, defaults: {} }
+  } else if (u.includes('/reports/latest')) {
+    body = reportsAvailable
+      ? {
+          ok: true,
+          data: {
+            generatedAt: '2026-11-02T15:30:00+08:00',
+            root: 'D:\\ws',
+            totals: { block: 0, warn: 3 },
+            projects: [
+              {
+                dir: 'D:\\ws\\alpha',
+                name: 'alpha',
+                version: '1.2.3',
+                verdict: 'ok',
+                summary: { block: 0, warn: 3, info: 0 },
+                findings: [
+                  { id: 'abs-path', level: 'warn', file: 'README.md', line: 42, message: '出现绝对路径 D:\\ws', suggestion: '改成相对路径' },
+                ],
+              },
+            ],
+          },
+        }
+      : { ok: true, data: null }
   } else {
     return { ok: false, status: 404, text: async () => 'not found' }
   }
@@ -298,7 +336,7 @@ await check('空目录 → 显示空状态提示', async () => {
   board.componentDidMount()
   await flush()
   const text = renderText(board.render())
-  assert.ok(text.includes('还没有发现项目'), '空状态文案缺失')
+  assert.ok(text.includes('没有属于你的仓库') || text.includes('还没有发现项目'), '空状态文案缺失')
   assert.ok(text.includes('扫描根目录'), '空状态应引导配置根目录')
 })
 
@@ -320,9 +358,64 @@ await check('请求走同源 API 路由', async () => {
   board.componentDidMount()
   await flush()
   const urls = fetchCalls.map((c) => c.url)
-  assert.ok(urls.some((u) => u.startsWith('/api/dsh-opensource-board/projects')), '缺少 projects 请求')
-  assert.ok(urls.some((u) => u.startsWith('/api/dsh-opensource-board/status')), '缺少 status 请求')
-  assert.ok(urls.some((u) => u.startsWith('/api/dsh-opensource-board/config')), '缺少 config 请求')
+  const hit = (name) => urls.some((u) => u.startsWith('/api/dsh-opensource-board/' + name) || u.startsWith('/dsh-opensource-board/' + name))
+  assert.ok(hit('projects'), '缺少 projects 请求')
+  assert.ok(hit('status'), '缺少 status 请求')
+  assert.ok(hit('config'), '缺少 config 请求')
+  assert.ok(hit('reports/latest'), '缺少 reports/latest 请求')
+})
+
+await check('同步状态徽标按 syncState 显示', async () => {
+  mode = 'ok'
+  reportsAvailable = false
+  const board = await mountBoard()
+  board.componentDidMount()
+  await flush()
+  const text = renderText(board.render())
+  assert.ok(text.includes('有 2 个未推送'), 'ahead 应显示未推送数量')
+  assert.ok(text.includes('无远程'), 'no-remote 应显示无远程')
+  assert.ok(text.includes('v1.2.3'), '应显示最新 tag')
+})
+
+await check('关掉「只看我的」后请求不再带 onlyMine=1', async () => {
+  mode = 'ok'
+  reportsAvailable = false
+  const board = await mountBoard()
+  board.componentDidMount()
+  await flush()
+  assert.ok(fetchCalls.some((c) => c.url.includes('onlyMine=1')), '默认应带 onlyMine=1')
+  fetchCalls.length = 0
+  board.onToggleOnlyMine(false)
+  await flush()
+  const urls = fetchCalls.map((c) => c.url)
+  assert.ok(urls.some((u) => u.includes('/projects')), '关掉过滤后仍应请求 projects')
+  assert.ok(!urls.some((u) => u.includes('onlyMine=1')), '关掉过滤后不应再带 onlyMine=1')
+})
+
+await check('自检面板展示上次自检与明细入口', async () => {
+  mode = 'ok'
+  reportsAvailable = true
+  try {
+    const board = await mountBoard()
+    board.componentDidMount()
+    await flush()
+    const text = renderText(board.render())
+    assert.ok(text.includes('上次自检'), '应显示上次自检标题')
+    assert.ok(text.includes('0 阻断 / 3 警告'), '应显示汇总计数')
+    assert.ok(text.includes('查看明细'), '应有明细展开入口')
+  } finally {
+    reportsAvailable = false
+  }
+})
+
+await check('没有自检记录时给出下一步提示', async () => {
+  mode = 'ok'
+  reportsAvailable = false
+  const board = await mountBoard()
+  board.componentDidMount()
+  await flush()
+  const text = renderText(board.render())
+  assert.ok(text.includes('还没有自检记录'), '无报告时应提示去跑一次')
 })
 
 await check('主路由 404 时自动退回别名路由', async () => {
