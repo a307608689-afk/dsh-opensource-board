@@ -360,13 +360,14 @@ window.__ModuleLoader__.load({
       cssEl = null
     }
 
-    /** 同源请求：主路由 404 时退回别名（宿主对 /api 的所有权未确认，两边都注册了）。 */
+    /** 同源请求：优先走无 /api 前缀的别名路由；宿主对 /api/* 可能返回 401（保留命名空间），
+     *  401/404 时再退回 /api 前缀。 */
     async function request(path, init) {
       const options = Object.assign({}, init)
       options.headers = Object.assign({ accept: 'application/json' }, (init && init.headers) || {})
-      let res = await fetch(API + path, options)
-      if (res.status === 404) {
-        res = await fetch(ALIAS_API + path, options)
+      let res = await fetch(ALIAS_API + path, options)
+      if (res.status === 404 || res.status === 401) {
+        res = await fetch(API + path, options)
       }
       const text = await res.text()
       let data = null
